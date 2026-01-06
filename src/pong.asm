@@ -1,5 +1,10 @@
 org 100h
 
+PADDLE_H equ 9
+PADDLE_W equ 2
+P1_X     equ 2
+P2_X     equ 76
+
 start:
     mov ax, 0B800h
     mov es, ax
@@ -7,67 +12,128 @@ start:
     call hide_cursor
     call clear_screen
 
+    mov byte [p1_y], 8
+    mov byte [p2_y], 8
+
+    mov ah, 00h
+    int 1Ah
+    mov [last_tick], dx
+
 main_loop:
+    call wait_tick
+    call read_all_input
+    call clamp_paddles
+
     call clear_screen
 
     mov al, 219
     mov ah, 1Fh
 
-    mov bx, 2
-    mov cx, 8
-    mov si, 2
-    mov di, 9
+    mov bx, P1_X
+    xor cx, cx
+    mov cl, [p1_y]
+    mov si, PADDLE_W
+    mov di, PADDLE_H
     call draw_rect
 
-    mov bx, 76
-    mov cx, 8
-    mov si, 2
-    mov di, 9
+    mov bx, P2_X
+    xor cx, cx
+    mov cl, [p2_y]
+    mov si, PADDLE_W
+    mov di, PADDLE_H
     call draw_rect
 
-    call poll_esc
-    cmp al, 1
+    jmp main_loop
+
+wait_tick:
+    push ax
+    push cx
+    push dx
+.loop:
+    mov ah, 00h
+    int 1Ah
+    mov cx, [last_tick]
+    cmp dx, cx
+    je .loop
+    mov [last_tick], dx
+    pop dx
+    pop cx
+    pop ax
+    ret
+
+read_all_input:
+.next:
+    mov ah, 01h
+    int 16h
+    jz .done
+
+    mov ah, 00h
+    int 16h
+
+    cmp al, 27
     je exit_game
 
-    call delay
-    jmp main_loop
+    cmp al, 'w'
+    je .p1_up
+    cmp al, 'W'
+    je .p1_up
+    cmp al, 's'
+    je .p1_down
+    cmp al, 'S'
+    je .p1_down
+
+    cmp al, 0
+    jne .next
+
+    cmp ah, 48h
+    je .p2_up
+    cmp ah, 50h
+    je .p2_down
+    jmp .next
+
+.p1_up:
+    mov al, [p1_y]
+    cmp al, 0
+    je .next
+    dec byte [p1_y]
+    jmp .next
+
+.p1_down:
+    inc byte [p1_y]
+    jmp .next
+
+.p2_up:
+    mov al, [p2_y]
+    cmp al, 0
+    je .next
+    dec byte [p2_y]
+    jmp .next
+
+.p2_down:
+    inc byte [p2_y]
+    jmp .next
+
+.done:
+    ret
+
+clamp_paddles:
+    mov al, [p1_y]
+    cmp al, 25 - PADDLE_H
+    jbe .p1_ok
+    mov byte [p1_y], 25 - PADDLE_H
+.p1_ok:
+    mov al, [p2_y]
+    cmp al, 25 - PADDLE_H
+    jbe .p2_ok
+    mov byte [p2_y], 25 - PADDLE_H
+.p2_ok:
+    ret
 
 exit_game:
     call show_cursor
     call clear_screen
     mov ax, 4C00h
     int 21h
-
-poll_esc:
-    mov ah, 01h
-    int 16h
-    jz .no_key
-
-    mov ah, 00h
-    int 16h
-    cmp al, 27
-    jne .no_key
-
-    mov al, 1
-    ret
-
-.no_key:
-    xor al, al
-    ret
-
-delay:
-    push cx
-    push dx
-    mov cx, 40
-.outer:
-    mov dx, 30000
-.inner:
-    dec dx
-    jnz .inner
-    loop .outer
-    pop dx
-    pop cx
-    ret
 
 hide_cursor:
     mov ah, 01h
@@ -142,3 +208,7 @@ draw_rect:
     pop bx
     pop ax
     ret
+
+p1_y db 8
+p2_y db 8
+last_tick dw 0
