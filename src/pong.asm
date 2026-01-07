@@ -6,13 +6,13 @@ SCREEN_H  equ 25
 BORDER_L  equ 0
 BORDER_R  equ 79
 BORDER_T  equ 0
-BORDER_B  equ 12
+BORDER_B  equ 24      ; Bottom border row
 
-PLAY_T    equ 1
-PLAY_B    equ 23
+PLAY_T    equ 1       ; Top play limit (just below top border)
+PLAY_B    equ 24      ; Bottom play limit (just above bottom border)
 
-PADDLE_H  equ 7
-PADDLE_W  equ 2
+PADDLE_H  equ 4
+PADDLE_W  equ 1
 P1_X      equ 2
 P2_X      equ 76
 
@@ -27,10 +27,11 @@ start:
     call clear_screen
     call draw_border_once
 
-    mov byte [p1_y], 9
-    mov byte [p2_y], 9
-    mov byte [p1_oldy], 9
-    mov byte [p2_oldy], 9
+    ; Center paddles
+    mov byte [p1_y], 4
+    mov byte [p2_y], 4
+    mov byte [p1_oldy], 4
+    mov byte [p2_oldy], 4
 
     call draw_paddles
 
@@ -104,16 +105,19 @@ read_all_input:
 .ri_done:
     ret
 
-clamp_paddles: 
+clamp_paddles:
+    ; Ensure paddle stays between Top Border (0) and Bottom Border (12)
+    ; Max Y = BORDER_B - PADDLE_H = 12 - 4 = 8
+    
     mov al, [p1_y]
     cmp al, PLAY_T
     jae .p1_top_ok
     mov byte [p1_y], PLAY_T
-.p1_top_ok: 
+.p1_top_ok:
     mov al, [p1_y]
-    cmp al, (PLAY_B - PADDLE_H + 1 - 9)
+    cmp al, (BORDER_B - PADDLE_H)
     jbe .p1_ok
-    mov byte [p1_y], (PLAY_B - PADDLE_H + 1 - 9)
+    mov byte [p1_y], (BORDER_B - PADDLE_H)
 .p1_ok:
 
     mov al, [p2_y]
@@ -122,10 +126,10 @@ clamp_paddles:
     mov byte [p2_y], PLAY_T
 .p2_top_ok:
     mov al, [p2_y]
-    cmp al, (PLAY_B - PADDLE_H + 1 - 9)
+    cmp al, (BORDER_B - PADDLE_H)
     jbe .p2_ok
-    mov byte [p2_y], (PLAY_B - PADDLE_H + 1 - 9)
-.p2_ok: 
+    mov byte [p2_y], (BORDER_B - PADDLE_H)
+.p2_ok:
     ret
 
 update_paddles:
@@ -149,7 +153,7 @@ update_paddles:
 .done:
     ret
 
-erase_p1_old: 
+erase_p1_old:
     mov al, ' '
     mov ah, 00h
     mov bx, P1_X
@@ -160,7 +164,7 @@ erase_p1_old:
     call draw_rect
     ret
 
-erase_p2_old: 
+erase_p2_old:
     mov al, ' '
     mov ah, 00h
     mov bx, P2_X
@@ -171,7 +175,7 @@ erase_p2_old:
     call draw_rect
     ret
 
-draw_p1_new: 
+draw_p1_new:
     mov al, 219
     mov ah, 0Fh
     mov bx, P1_X
@@ -201,6 +205,7 @@ draw_paddles:
 draw_border_once:
     mov ah, 0Bh
 
+    ; Top Line
     mov al, 196
     mov bx, BORDER_L
     mov cx, BORDER_T
@@ -208,41 +213,44 @@ draw_border_once:
     mov di, 1
     call draw_rect
 
+    ; Left Line (Height = BORDER_B + 1 to cover 0..12)
     mov al, 179
     mov bx, BORDER_L
     mov cx, BORDER_T
     mov si, 1
-    mov di, SCREEN_H
+    mov di, (BORDER_B + 1)
     call draw_rect
 
+    ; Right Line
     mov bx, BORDER_R
     mov cx, BORDER_T
     mov si, 1
-    mov di, SCREEN_H
+    mov di, (BORDER_B + 1)
     call draw_rect
 
-    mov al, 218
+    ; Corners
+    mov al, 218 ; Top Left
     mov bx, BORDER_L
     mov cx, BORDER_T
     mov si, 1
     mov di, 1
     call draw_rect
 
-    mov al, 191
+    mov al, 191 ; Top Right
     mov bx, BORDER_R
     mov cx, BORDER_T
     mov si, 1
     mov di, 1
     call draw_rect
 
-    mov al, 192
+    mov al, 192 ; Bottom Left
     mov bx, BORDER_L
     mov cx, BORDER_B
     mov si, 1
     mov di, 1
     call draw_rect
 
-    mov al, 217
+    mov al, 217 ; Bottom Right
     mov bx, BORDER_R
     mov cx, BORDER_B
     mov si, 1
@@ -251,12 +259,15 @@ draw_border_once:
 
     ret
 
-draw_border_bottom: 
+draw_border_bottom:
     mov ah, 0Bh
     mov al, 196
+    ; Start X=1, Width=78 to preserve corners
     mov bx, BORDER_L
+    inc bx
     mov cx, BORDER_B
     mov si, SCREEN_W
+    sub si, 2
     mov di, 1
     call draw_rect
     ret
@@ -293,6 +304,10 @@ clear_screen:
     pop ax
     ret
 
+; ---------------------------------------------
+; draw_rect:
+; Corrected memory calculation: (Y * 160) + (X * 2)
+; ---------------------------------------------
 draw_rect:
     push ax
     push bx
@@ -302,31 +317,40 @@ draw_rect:
     push di
     push bp
 
-    mov dx, di
-    mov di, cx
+    mov dx, di      ; Save Height in DX
+    mov di, cx      ; DI = Y
 
-    shl di, 7
-    mov bp, cx
-    shl bp, 5
-    add di, bp
-    add di, bx
-    shl di, 1
+    ; Calculate Y * 160
+    ; 160 = 128 + 32
+    shl di, 5       ; Y * 32
+    mov bp, di      ; Store Y*32
+    shl di, 2       ; Y * 128
+    add di, bp      ; DI = Y*128 + Y*32 = Y*160
 
-    mov bp, si
+    ; Calculate X * 2
+    shl bx, 1       ; BX = X * 2
+    
+    ; Final Offset
+    add di, bx      ; DI = (Y*160) + (X*2)
+
+    mov bp, si      ; BP = Width
 
 .dr_row:
-    push dx
-    mov cx, bp
+    push dx         ; Save Height counter
+    mov cx, bp      ; CX = Width
 .dr_col:
-    mov [es:di], ax
+    mov [es:di], ax ; Draw char+attr
     add di, 2
     loop .dr_col
-    pop dx
+    pop dx          ; Restore Height counter
 
-    add di, 160
-    mov bx, bp
-    shl bx, 1
-    sub di, bx
+    ; Move to next line
+    add di, 160     ; Jump one full row down
+    
+    ; Move DI back to the start of the rect (subtract width*2)
+    mov bx, bp      ; BX = Width
+    shl bx, 1       ; BX = Width * 2
+    sub di, bx      ; DI is now at the start X of the next line
 
     dec dx
     jnz .dr_row
