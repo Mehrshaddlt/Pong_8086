@@ -23,6 +23,13 @@ BALL_START_Y equ 12
 
 BALL_TICKS_PER_STEP equ 1
 
+WIN_SCORE equ 10
+
+; score position
+SCORE_L_X equ (MID_X / 2)
+SCORE_R_X equ (MID_X + 1 + ((SCREEN_W - 1 - MID_X) / 2))
+SCORE_Y   equ 0
+
 start:
     mov ax, 0003h
     int 10h
@@ -42,6 +49,7 @@ start:
 
     mov byte [score_l], 0
     mov byte [score_r], 0
+    mov byte [game_over], 0
     call draw_scores
 
     mov byte [p1_y], 10
@@ -75,7 +83,7 @@ read_all_input:
     je exit_game
 
     cmp al, 13
-    je .start_ball
+    je .enter_key
     cmp al, 32
     je .start_ball
 
@@ -96,7 +104,17 @@ read_all_input:
     je .p2_down
     jmp .ri_next
 
+.enter_key:
+    ; if game ended, ENTER resets the match
+    cmp byte [game_over], 1
+    jne .start_ball
+    call reset_game
+    jmp .ri_next
+
 .start_ball:
+    ; don't start ball if game_over
+    cmp byte [game_over], 1
+    je .ri_next
     mov byte [ball_moving], 1
     jmp .ri_next
 
@@ -175,6 +193,10 @@ reset_ball:
     ret
 
 update_ball:
+    ; freeze ball when game_over
+    cmp byte [game_over], 1
+    je .ret
+
     cmp byte [ball_moving], 1
     jne .ret
 
@@ -213,11 +235,13 @@ check_collisions:
     cmp al, PLAY_T
     jg .chk_bot
     mov byte [ball_vy], 1
+    call sfx_wall       
     jmp .chk_paddles
 .chk_bot:
     cmp al, PLAY_B
     jl .chk_paddles
     mov byte [ball_vy], -1
+    call sfx_wall      
 
 .chk_paddles:
     mov al, [ball_x]
@@ -232,6 +256,7 @@ check_collisions:
     cmp ah, cl
     jge .chk_p2
     mov byte [ball_vx], 1
+    call sfx_paddle       
 
 .chk_p2:
     mov al, [ball_x]
@@ -246,6 +271,7 @@ check_collisions:
     cmp ah, cl
     jge .chk_goals
     mov byte [ball_vx], -1
+    call sfx_paddle       
 
 .chk_goals:
     mov al, [ball_x]
@@ -258,12 +284,76 @@ check_collisions:
 .right_scores:
     inc byte [score_r]
     call draw_scores
+    call sfx_score       
+    call check_win_state
     call reset_ball
     call draw_ball_new
     ret
 
 .left_scores:
     inc byte [score_l]
+    call draw_scores
+    call sfx_score      
+    call check_win_state
+    call reset_ball
+    call draw_ball_new
+    ret
+
+check_win_state:
+    ; if left reached 10 => left winner
+    mov al, [score_l]
+    cmp al, WIN_SCORE
+    jne .chk_right
+    mov byte [game_over], 1
+    mov byte [winner_side], 0      ; 0 = left
+    call show_winner_screen
+    ret
+.chk_right:
+    mov al, [score_r]
+    cmp al, WIN_SCORE
+    jne .done
+    mov byte [game_over], 1
+    mov byte [winner_side], 1      ; 1 = right
+    call show_winner_screen
+.done:
+    ret
+
+show_winner_screen:
+    ; stop ball
+    mov byte [ball_moving], 0
+
+    ; draw WINNER/LOSER at score positions
+    cmp byte [winner_side], 0
+    jne .right_wins
+
+.left_wins:
+    mov bx, SCORE_L_X
+    mov cx, SCORE_Y
+    mov si, winner_txt
+    call draw_text
+
+    mov bx, SCORE_R_X
+    mov cx, SCORE_Y
+    mov si, loser_txt
+    call draw_text
+    ret
+
+.right_wins:
+    mov bx, SCORE_L_X
+    mov cx, SCORE_Y
+    mov si, loser_txt
+    call draw_text
+
+    mov bx, SCORE_R_X
+    mov cx, SCORE_Y
+    mov si, winner_txt
+    call draw_text
+    ret
+
+reset_game:
+    mov byte [score_l], 0
+    mov byte [score_r], 0
+    mov byte [game_over], 0
     call draw_scores
     call reset_ball
     call draw_ball_new
@@ -282,7 +372,7 @@ erase_ball_old:
     ret
 
 draw_ball_new:
-    mov al, 254
+    mov al, 254       ; ■
     mov ah, 0Fh
     mov bx, 0
     mov bl, [ball_x]
@@ -302,11 +392,21 @@ draw_ball:
     ret
 
 draw_scores:
+    ; clear both score areas first 
+    mov bx, SCORE_L_X
+    mov cx, SCORE_Y
+    mov si, blank6_txt
+    call draw_text
+    mov bx, SCORE_R_X
+    mov cx, SCORE_Y
+    mov si, blank6_txt
+    call draw_text
+
     mov al, [score_l]
     call byte_to_digit
     mov ah, 0Fh
-    mov bx, (MID_X / 2)
-    mov cx, 0
+    mov bx, SCORE_L_X
+    mov cx, SCORE_Y
     mov si, 1
     mov di, 1
     call draw_rect
@@ -314,8 +414,8 @@ draw_scores:
     mov al, [score_r]
     call byte_to_digit
     mov ah, 0Fh
-    mov bx, (MID_X + 1 + ((SCREEN_W - 1 - MID_X) / 2))
-    mov cx, 0
+    mov bx, SCORE_R_X
+    mov cx, SCORE_Y
     mov si, 1
     mov di, 1
     call draw_rect
@@ -327,6 +427,45 @@ byte_to_digit:
     mov al, 9
 .ok:
     add al, '0'
+    ret
+
+; draw_text:
+; BX = x, CX = y, SI = pointer to zero-terminated string, uses attr 0Fh
+draw_text:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push bp
+
+    ; DI = offset = (y*160) + (x*2)
+    mov di, cx
+    shl di, 5
+    mov bp, di
+    shl di, 2
+    add di, bp
+    shl bx, 1
+    add di, bx
+
+.dt_loop:
+    lodsb
+    cmp al, 0
+    je .dt_done
+    mov ah, 0Fh
+    mov [es:di], ax
+    add di, 2
+    jmp .dt_loop
+
+.dt_done:
+    pop bp
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
     ret
 
 draw_midline:
@@ -540,6 +679,83 @@ draw_rect:
     pop bx
     pop ax
     ret
+play_tone:
+    push ax
+    push bx
+    push cx
+    push dx
+
+    ; PIT ch2, lobyte/hibyte, mode 3 square wave
+    mov al, 0B6h
+    out 43h, al
+
+    ; reload value to ch2 (port 42h)
+    mov dx, 42h
+    mov bx, ax
+    mov al, bl
+    out dx, al
+    mov al, bh
+    out dx, al
+
+    ; enable speaker (bits 0 and 1)
+    in  al, 61h
+    mov ah, al
+    or  al, 03h
+    out 61h, al
+
+.delay:
+    loop .delay
+
+    ; disable speaker (restore)
+    mov al, ah
+    out 61h, al
+
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+sfx_gap:
+    push cx
+    mov cx, 1200
+.g:
+    loop .g
+    pop cx
+    ret
+
+; Wall bounce: mid pitch, medium length
+sfx_wall:
+    mov ax, 1100        ; 1084 Hz
+    mov cx, 18000    
+    call play_tone
+    ret
+
+; Paddle hit: higher pitch "click" (double blip)
+sfx_paddle:
+    mov ax, 800         ; 1491 Hz
+    mov cx, 11000
+    call play_tone
+    call sfx_gap
+    mov ax, 700         ; 1704 Hz
+    mov cx, 9000
+    call play_tone
+    ret
+
+; Score: two-tone long descending
+sfx_score:
+    mov ax, 600         ; 1988 Hz
+    mov cx, 22000
+    call play_tone
+    call sfx_gap
+    mov ax, 900         ; ~1326 Hz
+    mov cx, 24000
+    call play_tone
+    ret
+;data
+winner_txt db 'WINNER',0
+loser_txt  db 'LOSER ',0
+blank6_txt db '      ',0
 
 p1_y           db 0
 p2_y           db 0
@@ -556,6 +772,9 @@ ball_moving    db 0
 
 score_l        db 0
 score_r        db 0
+
+game_over      db 0     ; 1 when someone wins
+winner_side    db 0     ; 0=left, 1=right
 
 last_tick      dw 0
 ball_last_tick dw 0
