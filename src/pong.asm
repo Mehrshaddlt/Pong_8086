@@ -16,6 +16,8 @@ PADDLE_W  equ 1
 P1_X      equ 2
 P2_X      equ 76
 
+MID_X     equ 39
+
 BALL_START_X equ 40
 BALL_START_Y equ 12
 
@@ -31,6 +33,7 @@ start:
     call hide_cursor
     call clear_screen
     call draw_border_once
+    call draw_midline
 
     mov ah, 00h
     int 1Ah
@@ -47,6 +50,7 @@ start:
     mov byte [p2_oldy], 10
 
     call reset_ball
+
     call draw_paddles
     call draw_ball
 
@@ -278,8 +282,8 @@ erase_ball_old:
     ret
 
 draw_ball_new:
-    mov al, 'O'
-    mov ah, 0Eh
+    mov al, 254
+    mov ah, 0Fh
     mov bx, 0
     mov bl, [ball_x]
     mov cx, 0
@@ -301,7 +305,7 @@ draw_scores:
     mov al, [score_l]
     call byte_to_digit
     mov ah, 0Fh
-    mov bx, 2
+    mov bx, (MID_X / 2)
     mov cx, 0
     mov si, 1
     mov di, 1
@@ -310,7 +314,7 @@ draw_scores:
     mov al, [score_r]
     call byte_to_digit
     mov ah, 0Fh
-    mov bx, 77
+    mov bx, (MID_X + 1 + ((SCREEN_W - 1 - MID_X) / 2))
     mov cx, 0
     mov si, 1
     mov di, 1
@@ -323,6 +327,27 @@ byte_to_digit:
     mov al, 9
 .ok:
     add al, '0'
+    ret
+
+draw_midline:
+    mov al, 179
+    mov ah, 08h
+    mov bx, MID_X
+    mov cx, PLAY_T
+    mov si, 1
+    mov di, (PLAY_B - PLAY_T + 1)
+.dm_loop:
+    push cx
+    test cl, 1
+    jz .skip
+    mov si, 1
+    mov di, 1
+    call draw_rect
+.skip:
+    pop cx
+    inc cx
+    dec di
+    jnz .dm_loop
     ret
 
 erase_p1_old:
@@ -516,21 +541,21 @@ draw_rect:
     pop ax
     ret
 
-p1_y          db 0
-p2_y          db 0
-p1_oldy       db 0
-p2_oldy       db 0
+p1_y           db 0
+p2_y           db 0
+p1_oldy        db 0
+p2_oldy        db 0
 
-ball_x        db 0
-ball_y        db 0
-ball_oldx     db 0
-ball_oldy     db 0
-ball_vx       db 0
-ball_vy       db 0
-ball_moving   db 0
+ball_x         db 0
+ball_y         db 0
+ball_oldx      db 0
+ball_oldy      db 0
+ball_vx        db 0
+ball_vy        db 0
+ball_moving    db 0
 
-score_l       db 0
-score_r       db 0
+score_l        db 0
+score_r        db 0
 
-last_tick     dw 0
+last_tick      dw 0
 ball_last_tick dw 0
