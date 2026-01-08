@@ -6,15 +6,20 @@ SCREEN_H  equ 25
 BORDER_L  equ 0
 BORDER_R  equ 79
 BORDER_T  equ 0
-BORDER_B  equ 24      ; Bottom border row
+BORDER_B  equ 24
 
-PLAY_T    equ 1       ; Top play limit (just below top border)
-PLAY_B    equ 24      ; Bottom play limit (just above bottom border)
+PLAY_T    equ 1
+PLAY_B    equ 23
 
 PADDLE_H  equ 4
 PADDLE_W  equ 1
 P1_X      equ 2
 P2_X      equ 76
+
+BALL_START_X equ 40
+BALL_START_Y equ 12
+
+BALL_TICKS_PER_STEP equ 1
 
 start:
     mov ax, 0003h
@@ -27,38 +32,31 @@ start:
     call clear_screen
     call draw_border_once
 
-    ; Center paddles
-    mov byte [p1_y], 4
-    mov byte [p2_y], 4
-    mov byte [p1_oldy], 4
-    mov byte [p2_oldy], 4
+    mov ah, 00h
+    int 1Ah
+    mov [last_tick], dx
+    mov [ball_last_tick], dx
 
+    mov byte [score_l], 0
+    mov byte [score_r], 0
+    call draw_scores
+
+    mov byte [p1_y], 10
+    mov byte [p2_y], 10
+    mov byte [p1_oldy], 10
+    mov byte [p2_oldy], 10
+
+    call reset_ball
     call draw_paddles
+    call draw_ball
 
 main_loop:
-    call wait_tick
     call read_all_input
     call clamp_paddles
     call update_paddles
+    call update_ball
     call draw_border_bottom
     jmp main_loop
-
-wait_tick:
-    push ax
-    push cx
-    push dx
-    mov ah, 00h
-    int 1Ah
-    mov cx, dx
-.wt_loop:
-    mov ah, 00h
-    int 1Ah
-    cmp dx, cx
-    je .wt_loop
-    pop dx
-    pop cx
-    pop ax
-    ret
 
 read_all_input:
 .ri_next:
@@ -71,6 +69,11 @@ read_all_input:
 
     cmp al, 27
     je exit_game
+
+    cmp al, 13
+    je .start_ball
+    cmp al, 32
+    je .start_ball
 
     cmp al, 'w'
     je .p1_up
@@ -87,6 +90,10 @@ read_all_input:
     je .p2_up
     cmp ah, 50h
     je .p2_down
+    jmp .ri_next
+
+.start_ball:
+    mov byte [ball_moving], 1
     jmp .ri_next
 
 .p1_up:
@@ -106,9 +113,6 @@ read_all_input:
     ret
 
 clamp_paddles:
-    ; Ensure paddle stays between Top Border (0) and Bottom Border (12)
-    ; Max Y = BORDER_B - PADDLE_H = 12 - 4 = 8
-    
     mov al, [p1_y]
     cmp al, PLAY_T
     jae .p1_top_ok
@@ -151,6 +155,174 @@ update_paddles:
     mov [p2_oldy], al
 
 .done:
+    ret
+
+reset_ball:
+    mov byte [ball_moving], 0
+    mov byte [ball_x], BALL_START_X
+    mov byte [ball_y], BALL_START_Y
+    mov byte [ball_oldx], BALL_START_X
+    mov byte [ball_oldy], BALL_START_Y
+    mov byte [ball_vx], 1
+    mov byte [ball_vy], 1
+    mov ah, 00h
+    int 1Ah
+    mov [ball_last_tick], dx
+    ret
+
+update_ball:
+    cmp byte [ball_moving], 1
+    jne .ret
+
+    mov ah, 00h
+    int 1Ah
+    mov bx, dx
+    sub bx, [ball_last_tick]
+    cmp bx, BALL_TICKS_PER_STEP
+    jb .ret
+    mov [ball_last_tick], dx
+
+    call erase_ball_old
+
+    mov al, [ball_x]
+    add al, [ball_vx]
+    mov [ball_x], al
+
+    mov al, [ball_y]
+    add al, [ball_vy]
+    mov [ball_y], al
+
+    call check_collisions
+
+    call draw_ball_new
+
+    mov al, [ball_x]
+    mov [ball_oldx], al
+    mov al, [ball_y]
+    mov [ball_oldy], al
+
+.ret:
+    ret
+
+check_collisions:
+    mov al, [ball_y]
+    cmp al, PLAY_T
+    jg .chk_bot
+    mov byte [ball_vy], 1
+    jmp .chk_paddles
+.chk_bot:
+    cmp al, PLAY_B
+    jl .chk_paddles
+    mov byte [ball_vy], -1
+
+.chk_paddles:
+    mov al, [ball_x]
+    cmp al, (P1_X + PADDLE_W)
+    jne .chk_p2
+
+    mov ah, [ball_y]
+    mov cl, [p1_y]
+    cmp ah, cl
+    jl .chk_p2
+    add cl, PADDLE_H
+    cmp ah, cl
+    jge .chk_p2
+    mov byte [ball_vx], 1
+
+.chk_p2:
+    mov al, [ball_x]
+    cmp al, (P2_X - 1)
+    jne .chk_goals
+
+    mov ah, [ball_y]
+    mov cl, [p2_y]
+    cmp ah, cl
+    jl .chk_goals
+    add cl, PADDLE_H
+    cmp ah, cl
+    jge .chk_goals
+    mov byte [ball_vx], -1
+
+.chk_goals:
+    mov al, [ball_x]
+    cmp al, 1
+    jb .right_scores
+    cmp al, 78
+    ja .left_scores
+    ret
+
+.right_scores:
+    inc byte [score_r]
+    call draw_scores
+    call reset_ball
+    call draw_ball_new
+    ret
+
+.left_scores:
+    inc byte [score_l]
+    call draw_scores
+    call reset_ball
+    call draw_ball_new
+    ret
+
+erase_ball_old:
+    mov al, ' '
+    mov ah, 00h
+    mov bx, 0
+    mov bl, [ball_oldx]
+    mov cx, 0
+    mov cl, [ball_oldy]
+    mov si, 1
+    mov di, 1
+    call draw_rect
+    ret
+
+draw_ball_new:
+    mov al, 'O'
+    mov ah, 0Eh
+    mov bx, 0
+    mov bl, [ball_x]
+    mov cx, 0
+    mov cl, [ball_y]
+    mov si, 1
+    mov di, 1
+    call draw_rect
+    ret
+
+draw_ball:
+    call draw_ball_new
+    mov al, [ball_x]
+    mov [ball_oldx], al
+    mov al, [ball_y]
+    mov [ball_oldy], al
+    ret
+
+draw_scores:
+    mov al, [score_l]
+    call byte_to_digit
+    mov ah, 0Fh
+    mov bx, 2
+    mov cx, 0
+    mov si, 1
+    mov di, 1
+    call draw_rect
+
+    mov al, [score_r]
+    call byte_to_digit
+    mov ah, 0Fh
+    mov bx, 77
+    mov cx, 0
+    mov si, 1
+    mov di, 1
+    call draw_rect
+    ret
+
+byte_to_digit:
+    cmp al, 9
+    jbe .ok
+    mov al, 9
+.ok:
+    add al, '0'
     ret
 
 erase_p1_old:
@@ -204,8 +376,6 @@ draw_paddles:
 
 draw_border_once:
     mov ah, 0Bh
-
-    ; Top Line
     mov al, 196
     mov bx, BORDER_L
     mov cx, BORDER_T
@@ -213,7 +383,6 @@ draw_border_once:
     mov di, 1
     call draw_rect
 
-    ; Left Line (Height = BORDER_B + 1 to cover 0..12)
     mov al, 179
     mov bx, BORDER_L
     mov cx, BORDER_T
@@ -221,48 +390,44 @@ draw_border_once:
     mov di, (BORDER_B + 1)
     call draw_rect
 
-    ; Right Line
     mov bx, BORDER_R
     mov cx, BORDER_T
     mov si, 1
     mov di, (BORDER_B + 1)
     call draw_rect
 
-    ; Corners
-    mov al, 218 ; Top Left
+    mov al, 218
     mov bx, BORDER_L
     mov cx, BORDER_T
     mov si, 1
     mov di, 1
     call draw_rect
 
-    mov al, 191 ; Top Right
+    mov al, 191
     mov bx, BORDER_R
     mov cx, BORDER_T
     mov si, 1
     mov di, 1
     call draw_rect
 
-    mov al, 192 ; Bottom Left
+    mov al, 192
     mov bx, BORDER_L
     mov cx, BORDER_B
     mov si, 1
     mov di, 1
     call draw_rect
 
-    mov al, 217 ; Bottom Right
+    mov al, 217
     mov bx, BORDER_R
     mov cx, BORDER_B
     mov si, 1
     mov di, 1
     call draw_rect
-
     ret
 
 draw_border_bottom:
     mov ah, 0Bh
     mov al, 196
-    ; Start X=1, Width=78 to preserve corners
     mov bx, BORDER_L
     inc bx
     mov cx, BORDER_B
@@ -304,10 +469,6 @@ clear_screen:
     pop ax
     ret
 
-; ---------------------------------------------
-; draw_rect:
-; Corrected memory calculation: (Y * 160) + (X * 2)
-; ---------------------------------------------
 draw_rect:
     push ax
     push bx
@@ -317,40 +478,31 @@ draw_rect:
     push di
     push bp
 
-    mov dx, di      ; Save Height in DX
-    mov di, cx      ; DI = Y
+    mov dx, di
+    mov di, cx
+    shl di, 5
+    mov bp, di
+    shl di, 2
+    add di, bp
 
-    ; Calculate Y * 160
-    ; 160 = 128 + 32
-    shl di, 5       ; Y * 32
-    mov bp, di      ; Store Y*32
-    shl di, 2       ; Y * 128
-    add di, bp      ; DI = Y*128 + Y*32 = Y*160
+    shl bx, 1
+    add di, bx
 
-    ; Calculate X * 2
-    shl bx, 1       ; BX = X * 2
-    
-    ; Final Offset
-    add di, bx      ; DI = (Y*160) + (X*2)
-
-    mov bp, si      ; BP = Width
+    mov bp, si
 
 .dr_row:
-    push dx         ; Save Height counter
-    mov cx, bp      ; CX = Width
+    push dx
+    mov cx, bp
 .dr_col:
-    mov [es:di], ax ; Draw char+attr
+    mov [es:di], ax
     add di, 2
     loop .dr_col
-    pop dx          ; Restore Height counter
+    pop dx
 
-    ; Move to next line
-    add di, 160     ; Jump one full row down
-    
-    ; Move DI back to the start of the rect (subtract width*2)
-    mov bx, bp      ; BX = Width
-    shl bx, 1       ; BX = Width * 2
-    sub di, bx      ; DI is now at the start X of the next line
+    add di, 160
+    mov bx, bp
+    shl bx, 1
+    sub di, bx
 
     dec dx
     jnz .dr_row
@@ -364,7 +516,21 @@ draw_rect:
     pop ax
     ret
 
-p1_y     db 0
-p2_y     db 0
-p1_oldy  db 0
-p2_oldy  db 0
+p1_y          db 0
+p2_y          db 0
+p1_oldy       db 0
+p2_oldy       db 0
+
+ball_x        db 0
+ball_y        db 0
+ball_oldx     db 0
+ball_oldy     db 0
+ball_vx       db 0
+ball_vy       db 0
+ball_moving   db 0
+
+score_l       db 0
+score_r       db 0
+
+last_tick     dw 0
+ball_last_tick dw 0
