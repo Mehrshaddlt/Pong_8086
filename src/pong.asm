@@ -1,5 +1,6 @@
 org 100h
 
+; Constants
 SCREEN_W  equ 80
 SCREEN_H  equ 25
 
@@ -17,41 +18,102 @@ P1_X      equ 2
 P2_X      equ 76
 
 MID_X     equ 39
-BALL_DELAY_MAX equ 16000
+
+; Adjustment for the FPS
+BALL_DELAY_MAX equ 16000 
+
 BALL_START_X equ 40
 BALL_START_Y equ 12
 
-BALL_TICKS_PER_STEP equ 1
-
 WIN_SCORE equ 10
 
-; score position
+; Score display coordinates
 SCORE_L_X equ (MID_X / 2)
 SCORE_R_X equ (MID_X + 1 + ((SCREEN_W - 1 - MID_X) / 2))
 SCORE_Y   equ 0
 
+; Entry Point & Menu
 start:
+    ; Set Video Mode 03h (80x25 text)
     mov ax, 0003h
     int 10h
 
+    ; Setup Segment Register for Video Memory
     mov ax, 0B800h
     mov es, ax
 
     call hide_cursor
+
+show_menu:
+    call clear_screen
+    
+    ; Draw Title
+    mov bx, 35          
+    mov cx, 8           
+    mov si, title_txt
+    call draw_text
+
+    ; Draw Option 1
+    mov bx, 30
+    mov cx, 12
+    mov si, opt1_txt
+    call draw_text
+
+    ; Draw Option 2
+    mov bx, 30
+    mov cx, 14
+    mov si, opt2_txt
+    call draw_text
+
+    ; Draw Instructions
+    mov bx, 28
+    mov cx, 20
+    mov si, instr_txt
+    call draw_text
+
+.menu_loop:
+    mov ah, 00h
+    int 16h             ; Wait for key press
+
+    cmp al, '1'
+    je .start_pvp
+
+    cmp al, '2'
+    je .start_ai
+
+    cmp al, 27          ; ESC to quit
+    je exit_game
+    
+    jmp .menu_loop
+
+.start_pvp:
+    mov byte [ai_enabled], 0
+    jmp init_game
+
+.start_ai:
+    mov byte [ai_enabled], 1
+    jmp init_game
+
+; Game Initialization
+init_game:
     call clear_screen
     call draw_border_once
     call draw_midline
 
+    ; Seed random numbers logic is handled inside reset_ball later
+    ; But we init timers here just in case
     mov ah, 00h
     int 1Ah
     mov [last_tick], dx
     mov [ball_last_tick], dx
 
+    ; Reset Scores
     mov byte [score_l], 0
     mov byte [score_r], 0
     mov byte [game_over], 0
     call draw_scores
 
+    ; Reset Paddles
     mov byte [p1_y], 10
     mov byte [p2_y], 10
     mov byte [p1_oldy], 10
@@ -62,6 +124,7 @@ start:
     call draw_paddles
     call draw_ball
 
+; Main Game Loop
 main_loop:
     call read_all_input
     call clamp_paddles
@@ -70,23 +133,27 @@ main_loop:
     call draw_border_bottom
     jmp main_loop
 
+; Input Handling & AI
 read_all_input:
 .ri_next:
+    ; Check if key is available buffer
     mov ah, 01h
     int 16h
-    jz .ri_done
+    jz .check_ai        ; If no input, jump to AI check
 
+    ; Consume key
     mov ah, 00h
     int 16h
 
-    cmp al, 27
+    cmp al, 27          ; ESC
     je exit_game
 
-    cmp al, 13
+    cmp al, 13          ; ENTER
     je .enter_key
-    cmp al, 32
+    cmp al, 32          ; SPACE
     je .start_ball
 
+    ; P1 Controls
     cmp al, 'w'
     je .p1_up
     cmp al, 'W'
@@ -96,23 +163,25 @@ read_all_input:
     cmp al, 'S'
     je .p1_down
 
+    ; P2 Controls (Only if AI is OFF)
+    cmp byte [ai_enabled], 1
+    je .ri_next         ; Skip arrow keys if AI is on
+
     cmp al, 0
-    jne .ri_next
-    cmp ah, 48h
+    jne .ri_next        ; Extended keys have AL=0
+    cmp ah, 48h         ; Up Arrow
     je .p2_up
-    cmp ah, 50h
+    cmp ah, 50h         ; Down Arrow
     je .p2_down
     jmp .ri_next
 
 .enter_key:
-    ; if game ended, ENTER resets the match
+    ; If game ended, ENTER returns to menu
     cmp byte [game_over], 1
     jne .start_ball
-    call reset_game
-    jmp .ri_next
-
+    jmp show_menu       ; Go back to menu instead of just resetting
+    
 .start_ball:
-    ; don't start ball if game_over
     cmp byte [game_over], 1
     je .ri_next
     mov byte [ball_moving], 1
@@ -131,10 +200,54 @@ read_all_input:
     inc byte [p2_y]
     jmp .ri_next
 
+.check_ai:
+    cmp byte [ai_enabled], 1
+    jne .ri_done                ; If not AI, we are done
+    call run_ai_logic           ; Run the bot
+    
 .ri_done:
     ret
 
+; AI Logic
+run_ai_logic:
+    ; Direction
+    cmp byte [ball_vx], 1
+    jne .ai_ret
+
+    ; Visibility
+    cmp byte [ball_x], 30
+    jl .ai_ret
+
+    ; Mistake
+    push ax
+    push dx
+    mov ah, 00h
+    int 1Ah         
+    test dl, 00000011b  
+    pop dx
+    pop ax
+    jz .ai_ret      
+
+    ; Targeting
+    mov al, [p2_y]
+    add al, 2       
+    cmp al, [ball_y]
+    
+    jg .go_up       
+    jl .go_down     
+    jmp .ai_ret     
+
+.go_up:
+    dec byte [p2_y]
+    jmp .ai_ret
+.go_down:
+    inc byte [p2_y]
+.ai_ret:
+    ret
+
+; Game Logic
 clamp_paddles:
+    ; Clamp P1
     mov al, [p1_y]
     cmp al, PLAY_T
     jae .p1_top_ok
@@ -145,7 +258,7 @@ clamp_paddles:
     jbe .p1_ok
     mov byte [p1_y], (BORDER_B - PADDLE_H)
 .p1_ok:
-
+    ; Clamp P2
     mov al, [p2_y]
     cmp al, PLAY_T
     jae .p2_top_ok
@@ -159,6 +272,7 @@ clamp_paddles:
     ret
 
 update_paddles:
+    ; Draw P1 only if moved
     mov al, [p1_y]
     cmp al, [p1_oldy]
     je .chk2
@@ -168,6 +282,7 @@ update_paddles:
     mov [p1_oldy], al
 
 .chk2:
+    ; Draw P2 only if moved
     mov al, [p2_y]
     cmp al, [p2_oldy]
     je .done
@@ -186,9 +301,11 @@ reset_ball:
     mov byte [ball_oldx], BALL_START_X
     mov byte [ball_oldy], BALL_START_Y
 
-    ;Randomize Direction Start
+    ; Randomize Direction
     mov ah, 00h
     int 1Ah        
+    
+    ; Random Horizontal
     test dl, 1      
     jz .vx_neg      
     mov byte [ball_vx], 1
@@ -197,7 +314,7 @@ reset_ball:
     mov byte [ball_vx], -1
 
 .check_vy:
-    ; Randomize Vertical Direction (VY)
+    ; Random Vertical
     test dl, 2      
     jz .vy_neg     
     mov byte [ball_vy], 1
@@ -213,24 +330,21 @@ reset_ball:
     ret
 
 update_ball:
-    ; freeze ball when game_over
     cmp byte [game_over], 1
     je .ret
 
     cmp byte [ball_moving], 1
     jne .ret
 
-    ; --- NEW SMOOTH TIMER ---
-    ; Instead of checking clock ticks, we burn CPU cycles
+    ; Smooth Timer Delay
     dec word [ball_delay_counter]
-    jnz .ret                    ; If counter not zero, wait
+    jnz .ret                    ; Wait until counter is 0
     
-    ; Counter hit zero, reset it and move ball
+    ; Reset counter
     mov word [ball_delay_counter], BALL_DELAY_MAX
-    ; ------------------------
-
     call erase_ball_old
 
+    ; Update Positions
     mov al, [ball_x]
     add al, [ball_vx]
     mov [ball_x], al
@@ -243,6 +357,7 @@ update_ball:
 
     call draw_ball_new
 
+    ; Save old positions
     mov al, [ball_x]
     mov [ball_oldx], al
     mov al, [ball_y]
@@ -252,7 +367,7 @@ update_ball:
     ret
 
 check_collisions:
-    ; --- Top/Bottom Wall Checks ---
+    ; Top/Bottom Walls
     mov al, [ball_y]
     cmp al, PLAY_T
     jg .chk_bot
@@ -265,19 +380,19 @@ check_collisions:
     mov byte [ball_vy], -1
     call sfx_wall      
 
-    ; --- Paddle 1 (Left) Advanced Check ---
+    ; Paddle 1 (Left) Range Check
 .chk_p1:
-    cmp byte [ball_vx], -1      ; Only check if moving LEFT
+    cmp byte [ball_vx], -1      
     jne .chk_p2
 
-    ; Range Check: Is ball between P1 front (3) and P1 back (2)?
+    ; Is ball x between P1 front and back?
     mov al, [ball_x]
-    cmp al, (P1_X + PADDLE_W)   ; 3 (Surface)
-    jg .chk_p2                  ; If > 3, hasn't reached paddle
-    cmp al, P1_X                ; 2 (Back)
-    jl .chk_p2                  ; If < 2, passed through paddle (Goal)
+    cmp al, (P1_X + PADDLE_W)   
+    jg .chk_p2                  
+    cmp al, P1_X                
+    jl .chk_p2                  
 
-    ; Y Intersection Check
+    ; Is ball y within paddle height?
     mov ah, [ball_y]
     mov cl, [p1_y]
     cmp ah, cl
@@ -286,24 +401,24 @@ check_collisions:
     cmp ah, cl
     jge .chk_p2
 
-    ; HIT!
-    mov byte [ball_vx], 1       ; Bounce Right
+    ; Hit P1
+    mov byte [ball_vx], 1       
     call sfx_paddle
-    ret                         ; Exit immediately to avoid glitches
+    ret                         
 
-    ; --- Paddle 2 (Right) Advanced Check ---
+    ; Paddle 2 (Right) Range Check
 .chk_p2:
-    cmp byte [ball_vx], 1       ; Only check if moving RIGHT
+    cmp byte [ball_vx], 1       
     jne .chk_goals
 
-    ; Range Check: Is ball between P2 front (75) and P2 back (76)?
+    ; Is ball x between P2 front and back?
     mov al, [ball_x]
-    cmp al, (P2_X - 1)          ; 75 (Surface)
-    jl .chk_goals               ; If < 75, hasn't reached paddle
-    cmp al, P2_X                ; 76 (Back)
-    jg .chk_goals               ; If > 76, passed through paddle (Goal)
+    cmp al, (P2_X - 1)          
+    jl .chk_goals               
+    cmp al, P2_X                
+    jg .chk_goals               
 
-    ; Y Intersection Check
+    ; Is ball y within paddle height?
     mov ah, [ball_y]
     mov cl, [p2_y]
     cmp ah, cl
@@ -312,10 +427,10 @@ check_collisions:
     cmp ah, cl
     jge .chk_goals
 
-    ; HIT!
-    mov byte [ball_vx], -1      ; Bounce Left
+    ; Hit P2
+    mov byte [ball_vx], -1      
     call sfx_paddle
-    ret                         ; Exit immediately
+    ret                         
 
 .chk_goals:
     mov al, [ball_x]
@@ -342,30 +457,30 @@ check_collisions:
     call reset_ball
     call draw_ball_new
     ret
+
 check_win_state:
-    ; if left reached 10 => left winner
+    ; Left wins?
     mov al, [score_l]
     cmp al, WIN_SCORE
     jne .chk_right
     mov byte [game_over], 1
-    mov byte [winner_side], 0      ; 0 = left
+    mov byte [winner_side], 0      
     call show_winner_screen
     ret
 .chk_right:
+    ; Right wins?
     mov al, [score_r]
     cmp al, WIN_SCORE
     jne .done
     mov byte [game_over], 1
-    mov byte [winner_side], 1      ; 1 = right
+    mov byte [winner_side], 1      
     call show_winner_screen
 .done:
     ret
 
 show_winner_screen:
-    ; stop ball
     mov byte [ball_moving], 0
 
-    ; draw WINNER/LOSER at score positions
     cmp byte [winner_side], 0
     jne .right_wins
 
@@ -402,6 +517,7 @@ reset_game:
     call draw_ball_new
     ret
 
+; Drawing Functions
 erase_ball_old:
     mov al, ' '
     mov ah, 00h
@@ -415,7 +531,7 @@ erase_ball_old:
     ret
 
 draw_ball_new:
-    mov al, 254       ; ■
+    mov al, 254       ; Square block char
     mov ah, 0Fh
     mov bx, 0
     mov bl, [ball_x]
@@ -435,7 +551,7 @@ draw_ball:
     ret
 
 draw_scores:
-    ; clear both score areas first 
+    ; Clear areas
     mov bx, SCORE_L_X
     mov cx, SCORE_Y
     mov si, blank6_txt
@@ -445,6 +561,7 @@ draw_scores:
     mov si, blank6_txt
     call draw_text
 
+    ; Draw Left
     mov al, [score_l]
     call byte_to_digit
     mov ah, 0Fh
@@ -454,6 +571,7 @@ draw_scores:
     mov di, 1
     call draw_rect
 
+    ; Draw Right
     mov al, [score_r]
     call byte_to_digit
     mov ah, 0Fh
@@ -472,9 +590,8 @@ byte_to_digit:
     add al, '0'
     ret
 
-; draw_text:
-; BX = x, CX = y, SI = pointer to zero-terminated string, uses attr 0Fh
 draw_text:
+    ; BX=x, CX=y, SI=string
     push ax
     push bx
     push cx
@@ -483,7 +600,7 @@ draw_text:
     push di
     push bp
 
-    ; DI = offset = (y*160) + (x*2)
+    ; Calc offset: (y*160) + (x*2)
     mov di, cx
     shl di, 5
     mov bp, di
@@ -582,6 +699,7 @@ draw_paddles:
     ret
 
 draw_border_once:
+    ; Top
     mov ah, 0Bh
     mov al, 196
     mov bx, BORDER_L
@@ -590,6 +708,7 @@ draw_border_once:
     mov di, 1
     call draw_rect
 
+    ; Left Side
     mov al, 179
     mov bx, BORDER_L
     mov cx, BORDER_T
@@ -597,34 +716,36 @@ draw_border_once:
     mov di, (BORDER_B + 1)
     call draw_rect
 
+    ; Right Side
     mov bx, BORDER_R
     mov cx, BORDER_T
     mov si, 1
     mov di, (BORDER_B + 1)
     call draw_rect
 
-    mov al, 218
+    ; Corners
+    mov al, 218 ; TL
     mov bx, BORDER_L
     mov cx, BORDER_T
     mov si, 1
     mov di, 1
     call draw_rect
 
-    mov al, 191
+    mov al, 191 ; TR
     mov bx, BORDER_R
     mov cx, BORDER_T
     mov si, 1
     mov di, 1
     call draw_rect
 
-    mov al, 192
+    mov al, 192 ; BL
     mov bx, BORDER_L
     mov cx, BORDER_B
     mov si, 1
     mov di, 1
     call draw_rect
 
-    mov al, 217
+    mov al, 217 ; BR
     mov bx, BORDER_R
     mov cx, BORDER_B
     mov si, 1
@@ -677,6 +798,7 @@ clear_screen:
     ret
 
 draw_rect:
+    ; SI=w, DI=h, BX=x, CX=y, AL=char, AH=attr
     push ax
     push bx
     push cx
@@ -723,18 +845,18 @@ draw_rect:
     pop ax
     ret
 
+; Sound Effects
 play_tone:
     push ax
     push bx
     push cx
     push dx
 
-    ; PIT ch2,
+    ; Setup PIT
     mov al, 0B6h
     out 43h, al
-
-    ; DIVISOR = 1193180 / Frequency
-    ; Lower AX value = Higher Pitch
+    
+    ; Frequency
     mov dx, 42h
     mov bx, ax
     mov al, bl
@@ -742,18 +864,18 @@ play_tone:
     mov al, bh
     out dx, al
 
-    ; enable speaker
+    ; Speaker ON
     in  al, 61h
     mov ah, al
     or  al, 03h
     out 61h, al
 
 .delay:
-    push cx
+    push cx         ; Extra cycle burn for stability
     pop cx  
     loop .delay
 
-    ; disable speaker
+    ; Speaker OFF
     mov al, ah
     out 61h, al
 
@@ -765,56 +887,54 @@ play_tone:
 
 sfx_gap:
     push cx
-    mov cx, 5000       ; Increased gap to make double-tones distinct
+    mov cx, 5000       
 .g:
     nop
     loop .g
     pop cx
     ret
 
-; Wall bounce:
 sfx_wall:
-    mov ax, 2000        ; ~600 Hz 
-    mov ax, 900         ; ~1325 Hz 
+    mov ax, 2000        
+    mov ax, 900         
     mov cx, 15000       
     call play_tone
     ret
 
-; Paddle hit:
 sfx_paddle:
-    mov ax, 600         ; ~1988 Hz 
+    mov ax, 600          
     mov cx, 8000
     call play_tone
-    
     call sfx_gap
-    
-    mov ax, 1000        ; ~1193 Hz 
+    mov ax, 1000         
     mov cx, 8000
     call play_tone
     ret
 
-; Score:
 sfx_score:
-    mov ax, 1500        ; ~795 Hz
+    mov ax, 1500        
     mov cx, 15000
     call play_tone
-    
     call sfx_gap
-    
-    mov ax, 1000        ; ~1193 Hz
+    mov ax, 1000        
     mov cx, 15000
     call play_tone
-    
     call sfx_gap
-    
-    mov ax, 500         ; ~2386 Hz 
+    mov ax, 500         
     mov cx, 20000
     call play_tone
     ret
-;data
+
+; Data Section
 winner_txt db 'WINNER',0
 loser_txt  db 'LOSER ',0
 blank6_txt db '      ',0
+
+; Menu Strings
+title_txt  db 'PONG 8086',0
+opt1_txt   db '1. Human vs Human',0
+opt2_txt   db '2. Human vs Bot',0
+instr_txt  db 'Press 1 or 2 to start',0
 
 p1_y           db 0
 p2_y           db 0
@@ -832,8 +952,11 @@ ball_moving    db 0
 score_l        db 0
 score_r        db 0
 
-game_over      db 0     ; 1 when someone wins
-winner_side    db 0     ; 0=left, 1=right
+game_over      db 0
+winner_side    db 0
+
+ai_enabled     db 0    ; 0 = PVP, 1 = AI
+
 ball_delay_counter dw BALL_DELAY_MAX
 last_tick      dw 0
 ball_last_tick dw 0
