@@ -17,7 +17,7 @@ P1_X      equ 2
 P2_X      equ 76
 
 MID_X     equ 39
-
+BALL_DELAY_MAX equ 16000
 BALL_START_X equ 40
 BALL_START_Y equ 12
 
@@ -185,8 +185,28 @@ reset_ball:
     mov byte [ball_y], BALL_START_Y
     mov byte [ball_oldx], BALL_START_X
     mov byte [ball_oldy], BALL_START_Y
+
+    ;Randomize Direction Start
+    mov ah, 00h
+    int 1Ah        
+    test dl, 1      
+    jz .vx_neg      
     mov byte [ball_vx], 1
+    jmp .check_vy
+.vx_neg:
+    mov byte [ball_vx], -1
+
+.check_vy:
+    ; Randomize Vertical Direction (VY)
+    test dl, 2      
+    jz .vy_neg     
     mov byte [ball_vy], 1
+    jmp .finish_reset
+
+.vy_neg:
+    mov byte [ball_vy], -1
+
+.finish_reset:
     mov ah, 00h
     int 1Ah
     mov [ball_last_tick], dx
@@ -200,13 +220,14 @@ update_ball:
     cmp byte [ball_moving], 1
     jne .ret
 
-    mov ah, 00h
-    int 1Ah
-    mov bx, dx
-    sub bx, [ball_last_tick]
-    cmp bx, BALL_TICKS_PER_STEP
-    jb .ret
-    mov [ball_last_tick], dx
+    ; --- NEW SMOOTH TIMER ---
+    ; Instead of checking clock ticks, we burn CPU cycles
+    dec word [ball_delay_counter]
+    jnz .ret                    ; If counter not zero, wait
+    
+    ; Counter hit zero, reset it and move ball
+    mov word [ball_delay_counter], BALL_DELAY_MAX
+    ; ------------------------
 
     call erase_ball_old
 
@@ -231,23 +252,32 @@ update_ball:
     ret
 
 check_collisions:
+    ; --- Top/Bottom Wall Checks ---
     mov al, [ball_y]
     cmp al, PLAY_T
     jg .chk_bot
     mov byte [ball_vy], 1
     call sfx_wall       
-    jmp .chk_paddles
+    jmp .chk_p1
 .chk_bot:
     cmp al, PLAY_B
-    jl .chk_paddles
+    jl .chk_p1
     mov byte [ball_vy], -1
     call sfx_wall      
 
-.chk_paddles:
-    mov al, [ball_x]
-    cmp al, (P1_X + PADDLE_W)
+    ; --- Paddle 1 (Left) Advanced Check ---
+.chk_p1:
+    cmp byte [ball_vx], -1      ; Only check if moving LEFT
     jne .chk_p2
 
+    ; Range Check: Is ball between P1 front (3) and P1 back (2)?
+    mov al, [ball_x]
+    cmp al, (P1_X + PADDLE_W)   ; 3 (Surface)
+    jg .chk_p2                  ; If > 3, hasn't reached paddle
+    cmp al, P1_X                ; 2 (Back)
+    jl .chk_p2                  ; If < 2, passed through paddle (Goal)
+
+    ; Y Intersection Check
     mov ah, [ball_y]
     mov cl, [p1_y]
     cmp ah, cl
@@ -255,14 +285,25 @@ check_collisions:
     add cl, PADDLE_H
     cmp ah, cl
     jge .chk_p2
-    mov byte [ball_vx], 1
-    call sfx_paddle       
 
+    ; HIT!
+    mov byte [ball_vx], 1       ; Bounce Right
+    call sfx_paddle
+    ret                         ; Exit immediately to avoid glitches
+
+    ; --- Paddle 2 (Right) Advanced Check ---
 .chk_p2:
-    mov al, [ball_x]
-    cmp al, (P2_X - 1)
+    cmp byte [ball_vx], 1       ; Only check if moving RIGHT
     jne .chk_goals
 
+    ; Range Check: Is ball between P2 front (75) and P2 back (76)?
+    mov al, [ball_x]
+    cmp al, (P2_X - 1)          ; 75 (Surface)
+    jl .chk_goals               ; If < 75, hasn't reached paddle
+    cmp al, P2_X                ; 76 (Back)
+    jg .chk_goals               ; If > 76, passed through paddle (Goal)
+
+    ; Y Intersection Check
     mov ah, [ball_y]
     mov cl, [p2_y]
     cmp ah, cl
@@ -270,8 +311,11 @@ check_collisions:
     add cl, PADDLE_H
     cmp ah, cl
     jge .chk_goals
-    mov byte [ball_vx], -1
-    call sfx_paddle       
+
+    ; HIT!
+    mov byte [ball_vx], -1      ; Bounce Left
+    call sfx_paddle
+    ret                         ; Exit immediately
 
 .chk_goals:
     mov al, [ball_x]
@@ -298,7 +342,6 @@ check_collisions:
     call reset_ball
     call draw_ball_new
     ret
-
 check_win_state:
     ; if left reached 10 => left winner
     mov al, [score_l]
@@ -679,17 +722,19 @@ draw_rect:
     pop bx
     pop ax
     ret
+
 play_tone:
     push ax
     push bx
     push cx
     push dx
 
-    ; PIT ch2, lobyte/hibyte, mode 3 square wave
+    ; PIT ch2,
     mov al, 0B6h
     out 43h, al
 
-    ; reload value to ch2 (port 42h)
+    ; DIVISOR = 1193180 / Frequency
+    ; Lower AX value = Higher Pitch
     mov dx, 42h
     mov bx, ax
     mov al, bl
@@ -697,16 +742,18 @@ play_tone:
     mov al, bh
     out dx, al
 
-    ; enable speaker (bits 0 and 1)
+    ; enable speaker
     in  al, 61h
     mov ah, al
     or  al, 03h
     out 61h, al
 
 .delay:
+    push cx
+    pop cx  
     loop .delay
 
-    ; disable speaker (restore)
+    ; disable speaker
     mov al, ah
     out 61h, al
 
@@ -718,38 +765,50 @@ play_tone:
 
 sfx_gap:
     push cx
-    mov cx, 1200
+    mov cx, 5000       ; Increased gap to make double-tones distinct
 .g:
+    nop
     loop .g
     pop cx
     ret
 
-; Wall bounce: mid pitch, medium length
+; Wall bounce:
 sfx_wall:
-    mov ax, 1100        ; 1084 Hz
-    mov cx, 18000    
+    mov ax, 2000        ; ~600 Hz 
+    mov ax, 900         ; ~1325 Hz 
+    mov cx, 15000       
     call play_tone
     ret
 
-; Paddle hit: higher pitch "click" (double blip)
+; Paddle hit:
 sfx_paddle:
-    mov ax, 800         ; 1491 Hz
-    mov cx, 11000
+    mov ax, 600         ; ~1988 Hz 
+    mov cx, 8000
     call play_tone
+    
     call sfx_gap
-    mov ax, 700         ; 1704 Hz
-    mov cx, 9000
+    
+    mov ax, 1000        ; ~1193 Hz 
+    mov cx, 8000
     call play_tone
     ret
 
-; Score: two-tone long descending
+; Score:
 sfx_score:
-    mov ax, 600         ; 1988 Hz
-    mov cx, 22000
+    mov ax, 1500        ; ~795 Hz
+    mov cx, 15000
     call play_tone
+    
     call sfx_gap
-    mov ax, 900         ; ~1326 Hz
-    mov cx, 24000
+    
+    mov ax, 1000        ; ~1193 Hz
+    mov cx, 15000
+    call play_tone
+    
+    call sfx_gap
+    
+    mov ax, 500         ; ~2386 Hz 
+    mov cx, 20000
     call play_tone
     ret
 ;data
@@ -775,6 +834,6 @@ score_r        db 0
 
 game_over      db 0     ; 1 when someone wins
 winner_side    db 0     ; 0=left, 1=right
-
+ball_delay_counter dw BALL_DELAY_MAX
 last_tick      dw 0
 ball_last_tick dw 0
